@@ -1,0 +1,5 @@
+Compile (from top level directory):
+1. run 'init.pl <path to compiled SDK>'
+2. make
+
+Resulting executable: src/raytrace
