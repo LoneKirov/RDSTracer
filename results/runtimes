@@ -1,0 +1,9 @@
+CPU:
+real    6m3.627s
+user    6m3.010s
+sys 0m0.030s
+
+CUDA:
+real    0m1.796s
+user    0m1.690s
+sys     0m0.100s
