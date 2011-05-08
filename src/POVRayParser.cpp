@@ -1,446 +1,333 @@
-/**
-* POVRayParser.cpp
-* --------------------
-* Implementation for Parser for POV Ray files (.pov)
-* Author: Ryan Schmitt
-*/
+#define _POSIX_SOURCE
+#define _BSD_SOURCE
 
-#include "POVRayParser.h"
+#include <cstdio>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <errno.h>
 #include <iostream>
-#include <sstream>
-#include <cctype>
-#include <glm/gtc/matrix_transform.hpp>
 #include <boost/assert.hpp>
 #include <boost/lexical_cast.hpp>
-//#include <boost/tokenizer.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include "POVRayParser.h"
 
-namespace RDST
-{
-   SceneDescription
-   POVRayParser::ParseFile(const std::string& fileToParse)
-   {
-      //Scene description vars
-      CameraPtr pCam;
-      std::vector<PointLightPtr> lights;
-      std::vector<GeomObjectPtr> objs;
-      std::vector<SpherePtr> spheres;
+using namespace std;
+using namespace boost;
 
-      std::string line;
-      std::ifstream file(fileToParse.c_str());
-      if (file.fail()) {
-         std::cerr << "***Error: failed to open file: " << fileToParse << std::endl;
-         exit(EXIT_FAILURE);
-      }
-      while (std::getline(file, line)) {
-         RemoveComment(line);
-         std::string::size_type pos = line.find("camera");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            pCam = ParseCamera(line);
-         }
-         pos = line.find("light_source");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            lights.push_back(ParseLight(line));
-         }
-         pos = line.find("box");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            objs.push_back(ParseBox(line));
-         }
-         pos = line.find("cone");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            objs.push_back(ParseCone(line));
-         }
-         pos = line.find("plane");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            objs.push_back(ParsePlane(line));
-         }
-         pos = line.find("sphere");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            spheres.push_back(ParseSphere(line));
-         }
-         pos = line.find("triangle");
-         if (pos != std::string::npos) {
-            line = line.substr(pos);
-            GetWholeObject(line, file);
-            objs.push_back(ParseTriangle(line));
-         }
-      }
-      return SceneDescription(pCam, lights, objs, spheres);
-   }
+namespace RDST {
+    SceneDescription POVRayParser::ParseFile(const string &fname) {
+        SceneDescription sd;
+        struct stat s;
+        int fd;
+        int r = 0;
+        char *f = (char *) MAP_FAILED;
 
-   std::string&
-   POVRayParser::RemoveComment(std::string& line)
-   {
-      std::string::size_type pos = line.find("//");
-      line = line.substr(0, pos);
-      return line;
-   }
+        FILE *file = fopen(fname.c_str(), "r");
+        if (!file) {
+            perror(fname.c_str());
+            r = -1;
+            goto cleanup;
+        }
 
-   std::string&
-   POVRayParser::GetWholeObject(std::string& inputText, std::ifstream& file)
-   {
-      //check how many brackets we're dealing with from the input
-      int nonMatchedBrackets = 0;
-      std::string::const_iterator it(inputText.begin());
-      for (; it != inputText.end(); ++it) {
-         if (*it == '{') ++nonMatchedBrackets;
-         else if (*it == '}') --nonMatchedBrackets;
-      }
-      BOOST_ASSERT(nonMatchedBrackets >= 0);
-      //grab file text and store it in inputText until we get fully matched brackets
-      std::string line;
-      inputText += " "; //just to make sure we've got plenty white space
-      while (nonMatchedBrackets > 0 && std::getline(file, line)) {
-         RemoveComment(line);
-         line += " "; //add white space where the \n was.
-         it = line.begin();
-         for (; it != line.end() && nonMatchedBrackets > 0; ++it) {
-            inputText += *it;
-            if (*it == '{') ++nonMatchedBrackets;
-            else if (*it == '}') --nonMatchedBrackets;
-            BOOST_ASSERT(nonMatchedBrackets >= 0);
-         }
-      }
-      return inputText;
-   }
+        fd = fileno(file);
+        if (fstat(fd, &s) == -1) {
+            perror("fstat");
+            r = -1;
+            goto cleanup;
+        }
 
-   glm::vec3
-   POVRayParser::ParseVec3FromStream(std::istringstream& tokens)
-   {
-      std::string token;
+        // Map the matrix file into memory
+        f = (char *)mmap(NULL, s.st_size + 1, PROT_WRITE, MAP_PRIVATE, fd, 0);
+        if (f == MAP_FAILED) {
+            r = -1;
+            goto cleanup;
+        }
+        f[s.st_size] = '\0';
 
-      std::getline(tokens, token, ',');
-      float x = ParseFloat(token);
+        sd = POVRayParser(f, s.st_size + 1).parse().getScene();
 
-      std::getline(tokens, token, ',');
-      float y = ParseFloat(token);
+        // Advise the kernel that the memory will be accessed sequentially
+        if (madvise(f, s.st_size + 1, MADV_SEQUENTIAL) == -1) {
+            perror("madvise");
+            r = -1;
+            goto cleanup;
+        }
 
-      std::getline(tokens, token, '>');
-      float z = ParseFloat(token);
+cleanup:
+        if (file)
+            fclose(file);
+        if (f != MAP_FAILED && munmap(f, s.st_size) == -1)
+            r = -1;
+        if (r == -1) {
+            exit(EXIT_FAILURE);
+        }
 
-      return glm::vec3(x, y, z);
-   }
+        return sd;
+    }
 
-   glm::vec4
-   POVRayParser::ParseVec4FromStream(std::istringstream& tokens)
-   {
-      std::string token;
+    POVRayParser &POVRayParser::parse() {
+        _lights.reset(new std::vector<PointLightPtr>());
+        _objs.reset(new std::vector<GeomObjectPtr>());
+        _spheres.reset(new std::vector<SpherePtr>());
+        _triangles.reset(new std::vector<TrianglePtr>());
 
-      std::getline(tokens, token, ',');
-      float x = ParseFloat(token);
+        string cObject;
+        int oBraces = 0;
+        int cBraces = 0;
+        for (string::iterator i = _str.begin(); i != _str.end(); ) {
+            char c = *i++;
+            if (c == '\n' || c == '\r')
+                c = ' ';
+            if (c == '/' && i != _str.end() && *i == '/') {
+                for ( ;i != _str.end() && *i != '\n'; i++) {}
+                c = ' ';
+            }
+            cObject.push_back(c);
+            if (c == '{') {
+                oBraces++;
+            } else if (c == '}') {
+                cBraces++;
+                if (oBraces && oBraces == cBraces) {
+                    parseObject(cObject);
+                    oBraces = 0;
+                    cBraces = 0;
+                    cObject.erase(cObject.begin(), cObject.end());
+                }
+            }
+        }
+        return *this;
+    }
 
-      std::getline(tokens, token, ',');
-      float y = ParseFloat(token);
+    void POVRayParser::parseObject(const std::string &o) {
+        tokenizer fields(o, separator("{}<>, \t"));
+        tokenizer::iterator i = fields.begin();
+        string type(*i++);
+        _ptr = i;
+        _end = fields.end();
+        if (type == "camera") {
+            parseCamera();
+        } else if (type == "light_source") {
+            parseLight();
+        } else {
+            _ptr = fields.begin();
+            parseGeomObj();
+        }
+    }
 
-      std::getline(tokens, token, ',');
-      float z = ParseFloat(token);
+    void POVRayParser::parseCamera() {
+        glm::vec3 posVec, upVec, rightVec, lookAtVec;
+        for (; _ptr != _end; ) {
+            string attr = *_ptr++;
+            if (attr == "location") {
+                posVec = parseVec3();
+            } else if (attr == "up") {
+                upVec = parseVec3();
+            } else if (attr == "right") {
+                rightVec = parseVec3();
+            } else if (attr == "look_at") {
+                lookAtVec = parseVec3();
+            } else {
+                BOOST_ASSERT(false);
+            }
+        }
+        BOOST_ASSERT(_ptr == _end);
+        _camera = CameraPtr(new Camera(posVec, upVec, rightVec, lookAtVec-posVec));
+    }
 
-      std::getline(tokens, token, '>');
-      float w = ParseFloat(token);
+    float POVRayParser::parseFloat() {
+        return lexical_cast<float>(*_ptr++);
+    }
 
-      return glm::vec4(x, y, z, w);
-   }
+    glm::vec3 POVRayParser::parseVec3() {
+        float x = parseFloat();
+        float y = parseFloat();
+        float z = parseFloat();
+        return glm::vec3(x, y, z);
+    }
 
-   glm::vec3
-   POVRayParser::ParseScale(std::istringstream& tokens)
-   {
-      glm::vec3 scale(1.f); //default no scaling
-      while (char c = tokens.get()) {
-         if (c == '<') {
-            scale = ParseVec3FromStream(tokens);
-            break;
-         }
-         else if (std::isdigit(c)) {
-            scale = glm::vec3(boost::lexical_cast<float>(c));
-            break;
-         }
-      }
-      return scale;
-   }
+    glm::vec4 POVRayParser::parseVec4() {
+        glm::vec3 v = parseVec3();
+        float f = parseFloat();
+        return glm::vec4(v, f);
+    }
 
-   float
-   POVRayParser::ParseFloat(std::string& token)
-   {
-      std::string startChars("-.0123456789");
-      std::string endChars("0123456789");
-      std::string::size_type startPos(token.find_first_of(startChars));
-      std::string::size_type stopPos(token.find_last_of(endChars)+1);
-      token = token.substr(startPos, stopPos - startPos);
-      return boost::lexical_cast<float>(token);
-   }
+    void POVRayParser::parseLight() {
+        glm::vec3 posVec;
+        glm::vec4 color;
 
-   CameraPtr
-      POVRayParser::ParseCamera(const std::string& inputText)
-   {
-      glm::vec3 posVec, upVec, rightVec, lookAtVec;
-      std::string token;
-      std::istringstream tokens(inputText);
-      while (std::getline(tokens, token, ' ')) {
-         if (token.find("location") != std::string::npos)
-            posVec = ParseVec3FromStream(tokens);
-         else if (token.find("up") != std::string::npos)
-            upVec = ParseVec3FromStream(tokens);
-         else if (token.find("right") != std::string::npos)
-            rightVec = ParseVec3FromStream(tokens);
-         else if (token.find("look_at") != std::string::npos)
-            lookAtVec = ParseVec3FromStream(tokens);
-      }
-      return CameraPtr(new Camera(posVec, upVec, rightVec, lookAtVec-posVec));
-   }
+        posVec = parseVec3();
+        BOOST_ASSERT(*_ptr == "color");
+        _ptr++;
+        string type(*_ptr++);
+        if (type == "rgb") {
+            color = glm::vec4(parseVec3(), 1.f);
+        } else if (type == "rgbf") {
+            color = parseVec4();
+        } else {
+            BOOST_ASSERT(false);
+        }
+        BOOST_ASSERT(_ptr == _end);
 
-   PointLightPtr
-   POVRayParser::ParseLight(const std::string& inputText)
-   {
-      glm::vec3 posVec;
-      glm::vec4 color;
-      std::string token;
-      std::istringstream tokens(inputText);
-      while (std::getline(tokens, token, ' ')) {
-         if (token.find("light_source") != std::string::npos) //since lights have no "location" identifier, we just have to assume it comes first... lame
-            posVec = ParseVec3FromStream(tokens);
-         else if (token.find("rgb") != std::string::npos)
-            color = glm::vec4(ParseVec3FromStream(tokens), 1.f);
-         else if (token.find("rgbf") != std::string::npos)
-            color = ParseVec4FromStream(tokens);
-      }
-      return PointLightPtr(new PointLight(posVec, color));
-   }
+        _lights->push_back(PointLightPtr(new PointLight(posVec, color)));
+    }
 
-   Finish
-   POVRayParser::ParseFinish(std::istringstream& tokens)
-   {
-      float ambient, diffuse, specular, roughness, reflection, refraction, ior;
-      ambient = diffuse = specular = roughness = reflection = refraction = ior = 0.f;
-      std::string token;
-      bool running(true);
-      while (running && std::getline(tokens, token, ' ')) {
-         //Parse different types of Finish floats
-         if (token.find("ambient") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos) //Exit if we reach the closing '}'
-               running = false;
-            ambient = ParseFloat(token);
-         }
-         else if (token.find("diffuse") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            diffuse = ParseFloat(token);
-         }
-         else if (token.find("specular") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            specular = ParseFloat(token);
-         }
-         else if (token.find("roughness") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            roughness = ParseFloat(token);
-         }
-         else if (token.find("reflection") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            reflection = ParseFloat(token);
-         }
-         else if (token.find("refraction") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            refraction = ParseFloat(token);
-         }
-         else if (token.find("ior") != std::string::npos) {
-            tokens >> token;
-            if (token.find("}") != std::string::npos)
-               running = false;
-            ior = ParseFloat(token);
-         }
-      }
-      return Finish(ambient, diffuse, specular, roughness, reflection, refraction, ior);
-   }
+    void POVRayParser::parseGeomObj() {
+        string type(*_ptr++);
+        if (type == "box") {
+            parseBox();
+        } else if (type == "sphere") {
+            parseSphere();
+        } else if (type == "cone") {
+            parseCone();
+        } else if (type == "plane") {
+            parsePlane();
+        } else if (type == "triangle") {
+            parseTriangle();
+        }
+    }
 
-   void
-   POVRayParser::ParseGeomObject(std::istringstream& tokens, glm::vec4& color, glm::mat4& xforms, Finish& finish)
-   {
-      /*boost::char_separator<char> sep(" \n");
-      boost::tokenizer<boost::char_separator<char>> tok(inputText, sep);
-      for (boost::tokenizer<boost::char_separator<char>>::iterator beg=tok.begin(); beg!=tok.end();++beg) {
-      std::cout << *beg << "\n";
-      }*/
-      std::string token;
-      while (std::getline(tokens, token, ' ')) {
-         if (token.find("finish") != std::string::npos)
-            finish = ParseFinish(tokens);
-         else if (token.find("translate") != std::string::npos)
-            xforms = glm::translate(glm::mat4(1.f), ParseVec3FromStream(tokens)) * xforms;
-         else if (token.find("rotate") != std::string::npos) {
-            glm::vec3 axisRotsVec(ParseVec3FromStream(tokens));
-            xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.x, glm::vec3(1.f, 0.f, 0.f)) * xforms; //rotation about x
-            xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.y, glm::vec3(0.f, 1.f, 0.f)) * xforms; //rotation about y
-            xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.z, glm::vec3(0.f, 0.f, 1.f)) * xforms; //rotation about z
-         }
-         else if (token.find("scale") != std::string::npos)
-            xforms = glm::scale(glm::mat4(), ParseScale(tokens)) * xforms;
-         else if (token.find("rgb") != std::string::npos)
-            color = glm::vec4(ParseVec3FromStream(tokens), 1.f);
-         else if (token.find("rgbf") != std::string::npos)
-            color = ParseVec4FromStream(tokens);
-      }
-   }
+    void POVRayParser::parseBox() {
+        glm::vec3 corner1, corner2;
+        Finish finish;
+        glm::mat4 xforms(1.f);
+        glm::vec4 color;
 
-   BoxPtr
-   POVRayParser::ParseBox(const std::string& inputText)
-   {
-      //Box vars
-      glm::vec3 corner1, corner2;
-      Finish finish;
-      glm::mat4 xforms(1.f); //identity
-      glm::vec4 color;
+        corner1 = parseVec3();
+        corner2 = parseVec3();
+        parseModifiers(color, xforms, finish);
+        BOOST_ASSERT(_ptr == _end);
+        _objs->push_back(BoxPtr(new Box(corner1, corner2, color,
+                        xforms, finish)));
+    }
+    void POVRayParser::parseSphere() {
+        glm::vec3 center;
+        float radius;
+        Finish finish;
+        glm::mat4 xforms(1.f);
+        glm::vec4 color;
 
-      //Parsing vars
-      std::string token;
-      std::istringstream tokens(inputText);
+        center = parseVec3();
+        radius = parseFloat();
+        parseModifiers(color, xforms, finish);
+        BOOST_ASSERT(_ptr == _end);
+        _spheres->push_back(SpherePtr(new Sphere(center, radius, color, xforms,
+                        finish)));
+    }
+    void POVRayParser::parseCone() {
+        glm::vec3 end1, end2;
+        float radius1, radius2;
+        Finish finish;
+        glm::mat4 xforms(1.f);
+        glm::vec4 color;
 
-      //Type check
-      std::getline(tokens, token, ' ');
-      BOOST_ASSERT(token.find("box") != std::string::npos);
+        end1 = parseVec3();
+        radius1 = parseFloat();
+        end2 = parseVec3();
+        radius2 = parseFloat();
+        parseModifiers(color, xforms, finish);
+        BOOST_ASSERT(_ptr == _end);
+        _objs->push_back(ConePtr(new Cone(end1, radius1, end2, radius2, color,
+                        xforms, finish)));
+    }
+    void POVRayParser::parsePlane() {
+        glm::vec3 normal;
+        float distance;
+        Finish finish;
+        glm::mat4 xforms(1.f);
+        glm::vec4 color;
 
-      //Parse both corners, and other object params
-      corner1 = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between the locations
-      corner2 = ParseVec3FromStream(tokens);
-      ParseGeomObject(tokens, color, xforms, finish);
+        normal = glm::normalize(parseVec3());
+        distance = parseFloat();
+        parseModifiers(color, xforms, finish);
+        BOOST_ASSERT(_ptr == _end);
+        _objs->push_back(PlanePtr(new Plane(normal, distance, color,
+                        xforms, finish)));
+    }
+    void POVRayParser::parseTriangle() {
+        glm::vec3 vert1, vert2, vert3;
+        Finish finish;
+        glm::mat4 xforms(1.f);
+        glm::vec4 color;
 
-      return BoxPtr(new Box(corner1, corner2, color, xforms, finish));
-   }
+        vert1 = parseVec3();
+        vert2 = parseVec3();
+        vert3 = parseVec3();
+        parseModifiers(color, xforms, finish);
+        BOOST_ASSERT(_ptr == _end);
+        _triangles->push_back(TrianglePtr(new Triangle(vert1, vert2, vert3,
+                        color, xforms, finish)));
+    }
 
-   ConePtr
-   POVRayParser::ParseCone(const std::string& inputText)
-   {
-      //Cone vars
-      glm::vec3 end1, end2;
-      float radius1, radius2;
-      Finish finish;
-      glm::mat4 xforms(1.f); //identity
-      glm::vec4 color;
+    void POVRayParser::parseModifiers(glm::vec4 &color, glm::mat4 &xforms,
+            Finish &finish) {
+        for (; _ptr != _end; ) {
+            string op(*_ptr++);
+            if (op == "translate") {
+                xforms = glm::translate(glm::mat4(1.f),
+                        parseVec3()) * xforms;
+            } else if (op == "rotate") {
+                glm::vec3 axisRotsVec(parseVec3());
+                xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.x,
+                        glm::vec3(1.f, 0.f, 0.f)) * xforms;
+                xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.y,
+                        glm::vec3(0.f, 1.f, 0.f)) * xforms;
+                xforms = glm::rotate(glm::mat4(1.f), axisRotsVec.z,
+                        glm::vec3(0.f, 0.f, 1.f)) * xforms;
+            } else if (op == "scale") {
+                boost::tokenizer<separator>::iterator tPtr(_ptr);
+                tPtr++;
+                glm::vec3 scale(1.f);
+                if (tPtr->find_first_not_of("1234567890.-") == string::npos) {
+                    scale = parseVec3();
+                } else {
+                    scale = glm::vec3(parseFloat());
+                }
+            } else if (op == "pigment") {
+                BOOST_ASSERT(*_ptr == "color");
+                _ptr++;
+                string type(*_ptr++);
+                if (type == "rgb") {
+                    color = glm::vec4(parseVec3(), 1.f);
+                } else if (type == "rgbf") {
+                    color = parseVec4();
+                }
+            } else if (op == "finish") {
+                finish = parseFinish();
+            } else {
+                BOOST_ASSERT(false);
+            }
+        }
+    }
 
-      //Parsing vars
-      std::string token;
-      std::istringstream tokens(inputText);
-
-      //Type check
-      std::getline(tokens, token, ' ');
-      BOOST_ASSERT(token.find("cone") != std::string::npos); //type check
-
-      //Parse end1, radius1, end2, radius2, and other object params
-      end1 = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between
-      tokens >> token;
-      radius1 = ParseFloat(token);
-      end2 = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between
-      tokens >> token;
-      radius2 = ParseFloat(token);
-      ParseGeomObject(tokens, color, xforms, finish);
-
-      return ConePtr(new Cone(end1, radius1, end2, radius2, color, xforms, finish));
-   }
-
-   PlanePtr
-   POVRayParser::ParsePlane(const std::string& inputText)
-   {
-      //Plane vars
-      glm::vec3 normal;
-      float distance;
-      Finish finish;
-      glm::mat4 xforms(1.f); //identity
-      glm::vec4 color;
-
-      //Token vars
-      std::string token;
-      std::istringstream tokens(inputText);
-
-      //Type check
-      std::getline(tokens, token, ' ');
-      BOOST_ASSERT(token.find("plane") != std::string::npos);
-
-      //Parse normal, distance, and other object params
-      normal = glm::normalize(ParseVec3FromStream(tokens));
-      std::getline(tokens, token, ','); //eat the comma between
-      tokens >> token;
-      distance = ParseFloat(token);
-      ParseGeomObject(tokens, color, xforms, finish);
-
-      return PlanePtr(new Plane(normal, distance, color, xforms, finish));
-   }
-
-   SpherePtr
-   POVRayParser::ParseSphere(const std::string& inputText)
-   {
-      //Sphere vars
-      glm::vec3 center;
-      float radius;
-      Finish finish;
-      glm::mat4 xforms(1.f); //identity
-      glm::vec4 color;
-
-      //Token vars
-      std::string token;
-      std::istringstream tokens(inputText);
-
-      //Type check
-      std::getline(tokens, token, ' ');
-      BOOST_ASSERT(token.find("sphere") != std::string::npos);
-
-      //Parse normal, distance, and other object params
-      center = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between
-      tokens >> token;
-      radius = ParseFloat(token);
-      ParseGeomObject(tokens, color, xforms, finish);
-
-      return SpherePtr(new Sphere(center, radius, color, xforms, finish));
-   }
-
-   TrianglePtr
-   POVRayParser::ParseTriangle(const std::string& inputText)
-   {
-      //Triangle vars
-      glm::vec3 vert1, vert2, vert3;
-      Finish finish;
-      glm::mat4 xforms(1.f); //identity
-      glm::vec4 color;
-
-      //Token vars
-      std::string token;
-      std::istringstream tokens(inputText);
-
-      //Type check
-      std::getline(tokens, token, ' ');
-      BOOST_ASSERT(token.find("triangle") != std::string::npos);
-
-      //Parse normal, distance, and other object params
-      vert1 = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between
-      vert2 = ParseVec3FromStream(tokens);
-      std::getline(tokens, token, ','); //eat the comma between
-      vert3 = ParseVec3FromStream(tokens);
-      ParseGeomObject(tokens, color, xforms, finish);
-
-      return TrianglePtr(new Triangle(vert1, vert2, vert3, color, xforms, finish));
-   }
-
+    Finish POVRayParser::parseFinish() {
+        float ambient, diffuse, specular, roughness, reflection, refraction, ior;
+        ambient = diffuse = specular = roughness = reflection = refraction = ior = 0.f;
+        boost::tokenizer<separator>::iterator oPtr;
+        for (; _ptr != _end; ) {
+            oPtr = _ptr;
+            string op(*_ptr++);
+            if (op == "ambient") {
+                ambient = parseFloat();
+            } else if (op == "diffuse") {
+                diffuse = parseFloat();
+            } else if (op == "specular") {
+                specular = parseFloat();
+            } else if (op == "roughness") {
+                roughness = parseFloat();
+            } else if (op == "reflection") {
+                reflection = parseFloat();
+            } else if (op == "refraction") {
+                refraction = parseFloat();
+            } else if (op == "ior") {
+                ior = parseFloat();
+            } else {
+                _ptr = oPtr;
+                break;
+            }
+        }
+        return Finish(ambient, diffuse, specular, roughness, reflection,
+                refraction, ior);
+    }
 }
