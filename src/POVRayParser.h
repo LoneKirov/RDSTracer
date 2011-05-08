@@ -1,57 +1,55 @@
-/**
- * POVRayParser.h
- * --------------------
- * Parser for POV Ray files (.pov)
- * Author: Ryan Schmitt
- */
-
-#ifndef __POV_RAY_PARSER_H__
-#define __POV_RAY_PARSER_H__
-
-#define GLM_FORCE_INLINE
+#ifndef POV_PARSER_H
+#define POV_PARSER_H
 
 #include <string>
 #include <vector>
-#include <fstream>
-#include <boost/shared_ptr.hpp>
+#include <boost/tokenizer.hpp>
 #include "RDSScene.h"
 
-namespace RDST
-{
-   class POVRayParser
-   {
-   //Static Class to hide helper functions, should never be instantiated.
-   private:
-      explicit POVRayParser()
-      {}
-      explicit POVRayParser(const POVRayParser& rhs)
-      {}
-      ~POVRayParser()
-      {}
+namespace RDST {
+    class POVRayParser {
+        private:
+            typedef boost::char_separator<char> separator;
+            typedef boost::tokenizer<separator > tokenizer;
 
-   public:
-      static SceneDescription ParseFile(const std::string& fileToParse);
+            std::string _str;
+            tokenizer::iterator _ptr;
+            tokenizer::iterator _end;
 
-   private:
-      //Utils
-      static std::string&  RemoveComment (std::string& line);
-      static std::string&  GetWholeObject(std::string& inputText, std::ifstream& file);
-      static glm::vec3     ParseVec3FromStream(std::istringstream& tokens);
-      static glm::vec4     ParseVec4FromStream(std::istringstream& tokens);
-      static glm::vec3     ParseScale(std::istringstream& tokens);
-      static float         ParseFloat(std::string& token);
-      //Main Object Parsing
-      static CameraPtr     ParseCamera  (const std::string& inputText);
-      static PointLightPtr ParseLight   (const std::string& inputText);
-      static Finish        ParseFinish  (std::istringstream& tokens);
-      static void          ParseGeomObject(std::istringstream& tokens, glm::vec4& color, glm::mat4& xforms, Finish& finish);
-      static BoxPtr        ParseBox     (const std::string& inputText);
-      static ConePtr       ParseCone    (const std::string& inputText);
-      static PlanePtr      ParsePlane   (const std::string& inputText);
-      static SpherePtr     ParseSphere  (const std::string& inputText);
-      static TrianglePtr   ParseTriangle(const std::string& inputText);
+            CameraPtr _camera;
+            boost::shared_ptr<std::vector<PointLightPtr> > _lights;
+            boost::shared_ptr<std::vector<GeomObjectPtr> > _objs;
+            boost::shared_ptr<std::vector<SpherePtr> > _spheres;
+            boost::shared_ptr<std::vector<TrianglePtr> > _triangles;
 
-   };
-} // end namespace RDST
+
+            void parseObject(const std::string &);
+            float parseFloat();
+            glm::vec3 parseVec3();
+            glm::vec4 parseVec4();
+            void parseCamera();
+            void parseLight();
+            void parseGeomObj();
+            void parseBox();
+            void parseSphere();
+            void parseCone();
+            void parsePlane();
+            void parseTriangle();
+            void parseModifiers(glm::vec4 &, glm::mat4 &, Finish &);
+            Finish parseFinish();
+
+        public:
+            POVRayParser(char *str, size_t len) :
+                _str(str) {}
+
+            POVRayParser &parse();
+            SceneDescription getScene() {
+                return SceneDescription(_camera, _lights, _objs, _spheres,
+                        _triangles);
+            }
+            static SceneDescription ParseFile(const std::string &fname);
+    };
+
+};
 
 #endif
